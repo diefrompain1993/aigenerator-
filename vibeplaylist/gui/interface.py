@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 from ..mood_analyzer import analyze_text
 from ..playlist_namer import generate_playlist_name
 from ..utils import ensure_config_dir, get_logger
-from ..yandex_client import create_playlist, init_client, search_tracks
+from ..yandex_client import build_playlist_candidates, create_playlist, init_client
 
 logger = get_logger(__name__)
 
@@ -52,6 +52,8 @@ class VibePlaylistApp(QMainWindow):
         self.setMinimumWidth(600)
         self.token_path = ensure_config_dir() / "token.json"
         self.token = self.load_or_request_token()
+        self.current_tracks: List[dict] = []
+        self.current_analysis = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -109,33 +111,40 @@ class VibePlaylistApp(QMainWindow):
         if not description:
             QMessageBox.warning(self, "Пустое описание", "Пожалуйста, опишите ваш вайб")
             return
+        self.status_label.setText("Анализируем запрос…")
         try:
             analysis = analyze_text(description)
-            tracks = search_tracks(
-                analysis.get("genres", []),
-                analysis.get("moods", []),
-                analysis.get("keywords", []),
-            )
+            logger.info("Analysis result: %s", analysis)
+            self.status_label.setText("Ищем треки…")
+            tracks = build_playlist_candidates(analysis)
             self.display_tracks(tracks)
             self.current_tracks = tracks
             self.current_analysis = analysis
-            self.status_label.setText(f"Найдено треков: {len(tracks)}")
+            if tracks:
+                self.status_label.setText(f"Найдено треков: {len(tracks)}")
+            else:
+                self.status_label.setText("Треки не найдены")
+                QMessageBox.information(
+                    self,
+                    "Нет треков",
+                    "Не удалось подобрать треки под этот запрос. Попробуйте переформулировать или указать других артистов.",
+                )
             logger.info("Generated playlist candidates: %d tracks", len(tracks))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка при поиске треков: %s", exc)
             QMessageBox.critical(self, "Ошибка", f"Не удалось найти треки: {exc}")
+            self.status_label.setText("Ошибка поиска")
 
-    def display_tracks(self, tracks: List):
+    def display_tracks(self, tracks: List[dict]):
         self.tracks_list.clear()
         for track in tracks:
-            artists = ", ".join(artist.name for artist in track.artists) if track.artists else ""
-            item = QListWidgetItem(f"{track.title} — {artists}")
+            item = QListWidgetItem(f"{track['title']} — {track['artist']}")
             item.setData(Qt.UserRole, track)
             self.tracks_list.addItem(item)
 
     def handle_save_playlist(self):
         tracks = getattr(self, "current_tracks", [])
-        analysis = getattr(self, "current_analysis", {"moods": [], "genres": [], "keywords": []})
+        analysis = getattr(self, "current_analysis", {"moods": [], "genres": [], "keywords": [], "artists": []})
         if not tracks:
             QMessageBox.warning(self, "Нет треков", "Сначала сгенерируйте треки")
             return
@@ -143,6 +152,7 @@ class VibePlaylistApp(QMainWindow):
             analysis.get("moods", []),
             analysis.get("genres", []),
             analysis.get("keywords", []),
+            analysis.get("artists", []),
         )
         try:
             result = create_playlist(title, tracks)
@@ -152,3 +162,4 @@ class VibePlaylistApp(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка при создании плейлиста: %s", exc)
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить плейлист: {exc}")
+            self.status_label.setText("Ошибка сохранения")

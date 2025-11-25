@@ -1,5 +1,5 @@
 import json
-from typing import List
+from typing import Dict, List
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -49,11 +49,11 @@ class VibePlaylistApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VibePlaylist AI")
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(720)
         self.token_path = ensure_config_dir() / "token.json"
         self.token = self.load_or_request_token()
         self.current_tracks: List[dict] = []
-        self.current_analysis = {}
+        self.current_analysis: Dict[str, object] = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -63,6 +63,10 @@ class VibePlaylistApp(QMainWindow):
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("Опишите ваш вайб")
         layout.addWidget(self.text_input)
+
+        self.analysis_label = QLabel("Разбор запроса: —")
+        self.analysis_label.setWordWrap(True)
+        layout.addWidget(self.analysis_label)
 
         self.generate_button = QPushButton("Создать плейлист")
         self.generate_button.clicked.connect(self.handle_generate)
@@ -106,15 +110,24 @@ class VibePlaylistApp(QMainWindow):
         self.token_path.write_text(json.dumps(payload), encoding="utf-8")
         logger.info("Token saved to %s", self.token_path)
 
+    def _format_analysis(self, analysis: Dict[str, object]) -> str:
+        artists = ", ".join(analysis.get("artists", []))
+        moods = ", ".join(analysis.get("moods", []))
+        vibes = ", ".join(analysis.get("vibes", []))
+        genres = ", ".join(analysis.get("genres", []))
+        intensity = analysis.get("intensity", 0.5)
+        return f"Артисты: {artists or '—'} | Муды: {moods or '—'} | Вайб: {vibes or '—'} | Жанры: {genres or '—'} | Интенсивность: {intensity:.2f}"
+
     def handle_generate(self):
         description = self.text_input.toPlainText().strip()
         if not description:
             QMessageBox.warning(self, "Пустое описание", "Пожалуйста, опишите ваш вайб")
             return
-        self.status_label.setText("Анализируем запрос…")
+        self.status_label.setText("Генерируем как Spotify AI… Анализируем запрос…")
         try:
             analysis = analyze_text(description)
             logger.info("Analysis result: %s", analysis)
+            self.analysis_label.setText(f"Разбор запроса: {self._format_analysis(analysis)}")
             self.status_label.setText("Ищем треки…")
             tracks = build_playlist_candidates(analysis)
             self.display_tracks(tracks)
@@ -151,7 +164,7 @@ class VibePlaylistApp(QMainWindow):
         title = generate_playlist_name(
             analysis.get("moods", []),
             analysis.get("genres", []),
-            analysis.get("keywords", []),
+            analysis.get("search_terms", []),
             analysis.get("artists", []),
         )
         try:
@@ -161,5 +174,9 @@ class VibePlaylistApp(QMainWindow):
             QMessageBox.information(self, "Успех", f"Плейлист '{title}' сохранен в Яндекс Музыке")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка при создании плейлиста: %s", exc)
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить плейлист: {exc}")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                "Не удалось сохранить плейлист. Проверьте токен или попробуйте позже.",
+            )
             self.status_label.setText("Ошибка сохранения")

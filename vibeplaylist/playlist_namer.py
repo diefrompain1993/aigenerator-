@@ -1,21 +1,7 @@
-from random import choice
+"""Playlist naming utilities respecting vibes, genres, and artists."""
+from __future__ import annotations
+
 from typing import Iterable, List
-
-TEMPLATES = [
-    "Неоновая ночь",
-    "Осенняя грусть",
-    "Космический вайб",
-    "Ло-фай вечер",
-    "Грязный трэп",
-]
-
-SUFFIXES = [
-    "плейлист",
-    "вайб",
-    "ночь",
-    "день",
-    "история",
-]
 
 
 def _format_artists(artists: Iterable[str]) -> str:
@@ -27,26 +13,22 @@ def _format_artists(artists: Iterable[str]) -> str:
     return ", ".join(names)
 
 
-def generate_playlist_name(moods: Iterable[str], genres: Iterable[str], keywords: Iterable[str], artists: Iterable[str] | None = None) -> str:
-    """Generate a playlist title using moods, genres, and artists."""
+def generate_playlist_name(
+    moods: Iterable[str],
+    genres: Iterable[str],
+    keywords: Iterable[str],
+    artists: Iterable[str] | None = None,
+) -> str:
+    """Generate playlist title using dominant vibe, genre, and artists."""
     moods_list = list(moods)
     genres_list = list(genres)
     artists_list: List[str] = list(artists) if artists else []
+    keywords_list = list(keywords)
 
-    if artists_list and genres_list:
-        artist_block = _format_artists(artists_list)
-        genre = genres_list[0].title()
-        mood_block = moods_list[0].title() if moods_list else ""
-        return f"{mood_block + ' ' if mood_block else ''}{genre}: {artist_block} Vibes".strip()
+    primary_vibe = moods_list[0].title() if moods_list else (keywords_list[0].title() if keywords_list else "AI")
+    genre_block = genres_list[0].title() if genres_list else "Vibes"
+    artist_block = _format_artists(artists_list)
 
-    if moods_list and genres_list:
-        return f"{moods_list[0].title()} — {genres_list[0]}"
-
-    if artists_list:
-        return f"Вайб {artists_list[0]}"
-
-    base_name = choice(TEMPLATES)
-    pieces = list({*moods_list, *genres_list, *keywords})
-    if pieces:
-        base_name = choice(pieces).capitalize()
-    return f"{base_name} {choice(SUFFIXES)}".strip()
+    if artist_block:
+        return f"{primary_vibe} {genre_block} — {artist_block} AI Mix"
+    return f"{primary_vibe} {genre_block}"

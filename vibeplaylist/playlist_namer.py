@@ -1,4 +1,4 @@
-"""Playlist naming utilities respecting vibes, genres, and artists."""
+"""Playlist naming logic informed by vibe phases."""
 from __future__ import annotations
 
 from typing import Iterable, List
@@ -13,22 +13,39 @@ def _format_artists(artists: Iterable[str]) -> str:
     return ", ".join(names)
 
 
-def generate_playlist_name(
-    moods: Iterable[str],
-    genres: Iterable[str],
-    keywords: Iterable[str],
-    artists: Iterable[str] | None = None,
-) -> str:
-    """Generate playlist title using dominant vibe, genre, and artists."""
-    moods_list = list(moods)
-    genres_list = list(genres)
-    artists_list: List[str] = list(artists) if artists else []
-    keywords_list = list(keywords)
+def _main_vibe(phases: List[dict]) -> str:
+    if not phases:
+        return "AI Vibes"
+    moods = phases[0].get("moods", [])
+    vibes = phases[0].get("vibes", [])
+    if moods:
+        return moods[0].title()
+    if vibes:
+        return vibes[0].title()
+    return "AI Vibes"
 
-    primary_vibe = moods_list[0].title() if moods_list else (keywords_list[0].title() if keywords_list else "AI")
-    genre_block = genres_list[0].title() if genres_list else "Vibes"
-    artist_block = _format_artists(artists_list)
 
+def generate_playlist_name(phases: List[dict]) -> str:
+    """Generate a lively playlist title using phase transitions."""
+
+    if not phases:
+        return "AI Playlist"
+
+    primary = _main_vibe(phases)
+    genres = phases[0].get("genres", [])
+    genre_part = genres[0].title() if genres else "Mix"
+    artists = phases[0].get("artists", [])
+
+    if len(phases) > 1:
+        end_vibe = _main_vibe([phases[-1]])
+        artists_end = phases[-1].get("artists", [])
+        artist_block = _format_artists(artists or artists_end)
+        if artist_block:
+            return f"{primary} → {end_vibe} — {artist_block} Vibes"
+        return f"{primary} → {end_vibe}"
+
+    artist_block = _format_artists(artists)
     if artist_block:
-        return f"{primary_vibe} {genre_block} — {artist_block} AI Mix"
-    return f"{primary_vibe} {genre_block}"
+        return f"{primary} {genre_part} — {artist_block} AI Mix"
+    return f"{primary} {genre_part}"
+

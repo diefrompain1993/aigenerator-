@@ -1,130 +1,320 @@
-"""Mood and vibe analysis for user prompts (Spotify AI-like).
+"""Advanced prompt analysis to build Spotify-like vibe profiles.
 
-This module parses free-form text into structured signals: artists, genres,
-moods, vibes, intensity, and search terms. It also validates potential artist
-names against Yandex Music search results.
+This module converts free-form text prompts into structured phase-based
+representations that downstream recommenders can use to build smooth,
+multi-phase playlists. It performs light-weight NLP using rule-based
+segmenters, keyword lexicons, and on-demand artist validation via the
+Yandex Music client.
 """
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
 
 from .utils import get_logger
 from .yandex_client import get_client
 
 logger = get_logger(__name__)
 
-# Keyword buckets for moods and vibes inspired by Spotify-style labels
+
+# --- Data structures -------------------------------------------------------
+
+
+@dataclass
+class PhaseProfile:
+    """Normalized description of a single vibe phase."""
+
+    role: str
+    raw_text: str
+    artists: List[str] = field(default_factory=list)
+    genres: List[str] = field(default_factory=list)
+    moods: List[str] = field(default_factory=list)
+    vibes: List[str] = field(default_factory=list)
+    intensity: float = 0.5
+    energy: float = 0.5
+    valence: float = 0.5
+    tempo_range: Tuple[int, int] = (80, 140)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "role": self.role,
+            "raw_text": self.raw_text,
+            "artists": self.artists,
+            "genres": self.genres,
+            "moods": self.moods,
+            "vibes": self.vibes,
+            "intensity": self.intensity,
+            "energy": self.energy,
+            "valence": self.valence,
+            "tempo_range": self.tempo_range,
+        }
+
+
+# --- Keyword lexicons ------------------------------------------------------
+
+
 MOOD_KEYWORDS = {
-    "dark": ["dark", "тёмн", "noir", "blackout", "gloom"],
-    "bright": ["ярк", "bright", "light", "sunny"],
-    "sad": ["sad", "груст", "melanch", "печал", "осен"],
-    "hype": ["hype", "hyped", "party", "энерг"],
-    "chill": ["chill", "calm", "relax", "спокой", "lofi"],
-    "dreamy": ["dream", "сонн", "aerial", "float"],
-    "neon": ["неон", "neon", "night", "nightdrive", "drive"],
-    "winter": ["winter", "зима", "snow", "frost", "cold"],
-    "cinematic": ["film", "кино", "cinema", "саундтрек", "эпич"],
+    "dark": ["dark", "тёмн", "noir", "black", "cold", "winter", "frost"],
+    "bright": ["bright", "светл", "light", "warm", "солнеч"],
+    "sad": ["sad", "груст", "печаль", "осен", "тоск"],
+    "hype": ["hype", "party", "клуб", "энерг", "rave"],
+    "chill": ["chill", "calm", "спокой", "lofi", "расслаб"],
+    "dreamy": ["dream", "сонн", "dreamy", "эфирн"],
+    "neon": ["неон", "neon", "night", "drive", "synth"],
+    "winter": ["зим", "winter", "frost", "cold"],
+    "cinematic": ["cinematic", "саундтрек", "кино", "film"],
     "emotional": ["эмо", "эмоцион", "emotional", "heart"],
-    "nostalgic": ["ностальг", "nostalg", "retro", "old", "80s"],
-    "aggressive": ["агресс", "ярост", "rage", "грим", "drill", "phonk"],
-    "trap vibe": ["trap", "трэп", "trap vibe", "rage"],
-    "lofi vibe": ["lofi", "лофай", "study", "rain"],
-    "synthwave vibe": ["synth", "синтвейв", "retrowave", "неонов"],
+    "nostalgic": ["ностальг", "nostalg", "retro", "old"],
+    "aggressive": ["aggressive", "агресс", "rage", "жёстк", "жестк", "drill"],
+    "trap vibe": ["trap", "трэп", "rage"],
+    "lofi vibe": ["lofi", "лофай", "study"],
+    "synthwave vibe": ["synth", "синтвейв", "ретро", "drive"],
+    "romantic": ["романт", "romantic", "love"],
+    "autumn": ["осень", "autumn", "желт", "листья"],
 }
 
 GENRE_HINTS = {
-    "trap": ["trap", "трэп", "rage"],
+    "trap": ["trap", "трэп", "rage", "phonk"],
     "phonk": ["phonk", "фо"],
     "drill": ["drill", "дрилл"],
     "synthwave": ["синт", "synth", "retrowave", "drive"],
     "lofi": ["lofi", "лофай", "study"],
-    "chillout": ["chill", "calm", "relax"],
-    "ambient": ["ambient", "космос"],
-    "cinematic": ["cinematic", "саундтрек", "кино"],
+    "ambient": ["ambient", "космос", "space"],
+    "cinematic": ["cinematic", "саундтрек", "кино", "film"],
+    "indie": ["indie", "инди"],
+    "dream pop": ["dream pop", "dream", "soft"],
+    "club": ["club", "клуб", "house", "techno"],
 }
 
-STOPWORDS = {"вайб", "музыка", "плейлист", "как", "для", "под", "сделай", "сделать", "нужен"}
+INTENSITY_WEIGHTS = {
+    "aggressive": 0.85,
+    "dark": 0.75,
+    "hype": 0.8,
+    "trap vibe": 0.75,
+    "drill": 0.85,
+    "phonk": 0.8,
+    "bright": 0.55,
+    "dreamy": 0.45,
+    "chill": 0.35,
+    "romantic": 0.4,
+    "lofi vibe": 0.3,
+    "winter": 0.5,
+    "sad": 0.35,
+    "cinematic": 0.5,
+}
+
+VALENCE_HINTS = {
+    "dark": 0.3,
+    "aggressive": 0.35,
+    "hype": 0.6,
+    "bright": 0.7,
+    "romantic": 0.6,
+    "sad": 0.3,
+    "chill": 0.5,
+    "dreamy": 0.55,
+    "winter": 0.4,
+    "nostalgic": 0.45,
+    "cinematic": 0.55,
+}
+
+TEMPO_HINTS = {
+    "aggressive": (130, 170),
+    "trap vibe": (120, 160),
+    "drill": (130, 160),
+    "hype": (120, 150),
+    "dark": (100, 140),
+    "romantic": (60, 110),
+    "sad": (60, 110),
+    "dreamy": (70, 120),
+    "chill": (70, 110),
+    "lofi vibe": (70, 100),
+    "synthwave vibe": (100, 140),
+}
+
+TRANSITION_MARKERS = [
+    r"в начале",
+    r"сначала",
+    r"потом",
+    r"затем",
+    r"далее",
+    r"в конце",
+    r"плавн",
+    r"переход",
+]
 
 
-def _normalize_tokens(text: str) -> List[str]:
-    return [token for token in re.split(r"\s+", text.lower()) if token]
+# --- Helper utilities ------------------------------------------------------
 
 
-def _extract_artists(prompt: str) -> List[str]:
-    """Split prompt and validate fragments as artist names using Yandex Music search."""
+def _split_phases(prompt: str) -> List[Tuple[str, str]]:
+    """Heuristically split prompt into phases based on transition markers."""
+
+    lowered = prompt.lower()
+    if not any(marker in lowered for marker in TRANSITION_MARKERS):
+        return [("single", prompt)]
+
+    # Split by common transition words while keeping order
+    parts = re.split(r"(в начале|сначала|потом|затем|далее|в конце)", prompt, flags=re.IGNORECASE)
+    phases: List[Tuple[str, str]] = []
+    role_order = ["start", "middle", "end"]
+    role_idx = 0
+    buffer = ""
+    for part in parts:
+        if not part:
+            continue
+        if re.fullmatch(r"(в начале|сначала|потом|затем|далее|в конце)", part, flags=re.IGNORECASE):
+            if buffer.strip():
+                phases.append((role_order[min(role_idx, len(role_order) - 1)], buffer.strip()))
+                buffer = ""
+                role_idx = min(role_idx + 1, len(role_order) - 1)
+        else:
+            buffer += " " + part
+    if buffer.strip():
+        phases.append((role_order[min(role_idx, len(role_order) - 1)], buffer.strip()))
+
+    return phases or [("single", prompt)]
+
+
+def _validate_artists(candidates: List[str]) -> List[str]:
+    """Validate candidate artist names via Yandex Music search."""
+
     try:
         client = get_client()
     except RuntimeError:
         logger.warning("Client not initialized; skipping artist validation")
         return []
 
-    fragments = re.split(r",|&|\bи\b", prompt, flags=re.IGNORECASE)
     artists: List[str] = []
-    for fragment in fragments:
-        candidate = fragment.strip()
-        if not candidate:
-            continue
-        lower_candidate = candidate.lower()
-        if any(lower_candidate.startswith(key) for key in STOPWORDS):
-            continue
-        if any(key in lower_candidate for values in MOOD_KEYWORDS.values() for key in values):
-            # looks like mood word
-            continue
+    for cand in candidates:
         try:
-            search_result = client.search(candidate, type_="artist")
+            search_result = client.search(cand, type_="artist")
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Artist search failed for '%s': %s", candidate, exc)
+            logger.exception("Artist search failed for '%s': %s", cand, exc)
             continue
         if search_result.artists and search_result.artists.results:
             artists.append(search_result.artists.results[0].name)
     return list(dict.fromkeys(artists))
 
 
-def _score_intensity(tokens: List[str]) -> float:
-    """Estimate intensity between 0 and 1 based on aggressive or calm cues."""
-    aggressive = {"агресс", "rage", "drill", "trap", "gym", "хайп", "жест"}
-    calm = {"chill", "calm", "lofi", "спокой", "sleep", "dream"}
-    score = 0.5
-    for token in tokens:
-        if any(k in token for k in aggressive):
-            score += 0.1
-        if any(k in token for k in calm):
-            score -= 0.1
-    return max(0.0, min(1.0, score))
+def _extract_artists(text: str) -> List[str]:
+    """Extract artist-like fragments split by commas, ampersands, and 'и'."""
+
+    fragments = re.split(r",|&|\bи\b", text, flags=re.IGNORECASE)
+    candidates: List[str] = []
+    for frag in fragments:
+        candidate = frag.strip()
+        if not candidate:
+            continue
+        if any(keyword in candidate.lower() for values in MOOD_KEYWORDS.values() for keyword in values):
+            continue
+        candidates.append(candidate)
+    return _validate_artists(candidates)
 
 
-def analyze_text(prompt: str) -> Dict[str, object]:
-    """Analyze a user prompt into artists, genres, moods, vibes, intensity, and search terms."""
-    lowered = prompt.lower()
-    tokens = _normalize_tokens(prompt)
+def _collect_moods_and_genres(text: str) -> Tuple[List[str], List[str], List[str]]:
+    """Return moods, vibes, and genres detected in a text snippet."""
 
-    # moods/vibes detection
+    lowered = text.lower()
     moods: List[str] = []
     vibes: List[str] = []
-    for label, keywords in MOOD_KEYWORDS.items():
-        if any(word in lowered for word in keywords):
-            moods.append(label)
-            vibes.extend([kw for kw in keywords if len(kw) > 3])
+    for mood, keywords in MOOD_KEYWORDS.items():
+        if any(key in lowered for key in keywords):
+            moods.append(mood)
+            vibes.extend([k for k in keywords if len(k) > 3])
 
-    # genres
     genres: List[str] = []
     for genre, hints in GENRE_HINTS.items():
-        if any(hint in lowered for hint in hints):
+        if any(h in lowered for h in hints):
             genres.append(genre)
 
-    artists = _extract_artists(prompt)
+    return list(dict.fromkeys(moods)), list(dict.fromkeys(vibes)), list(dict.fromkeys(genres))
 
-    search_terms = list(dict.fromkeys(tokens + moods + genres))
-    intensity = _score_intensity(tokens)
+
+def _estimate_energy_valence(moods: List[str]) -> Tuple[float, float]:
+    """Approximate energy/valence from detected moods."""
+
+    if not moods:
+        return 0.5, 0.5
+    energies = [INTENSITY_WEIGHTS.get(mood, 0.5) for mood in moods]
+    valences = [VALENCE_HINTS.get(mood, 0.5) for mood in moods]
+    return sum(energies) / len(energies), sum(valences) / len(valences)
+
+
+def _tempo_from_moods(moods: List[str]) -> Tuple[int, int]:
+    """Pick a tempo range informed by moods."""
+
+    ranges = [TEMPO_HINTS[mood] for mood in moods if mood in TEMPO_HINTS]
+    if not ranges:
+        return (80, 140)
+    low = sum(r[0] for r in ranges) // len(ranges)
+    high = sum(r[1] for r in ranges) // len(ranges)
+    return (low, high)
+
+
+def _phase_from_text(role: str, text: str) -> PhaseProfile:
+    moods, vibes, genres = _collect_moods_and_genres(text)
+    artists = _extract_artists(text)
+    energy, valence = _estimate_energy_valence(moods)
+    tempo = _tempo_from_moods(moods)
+    intensity = max(0.0, min(1.0, energy))
+
+    return PhaseProfile(
+        role=role,
+        raw_text=text.strip(),
+        artists=artists,
+        genres=genres,
+        moods=moods,
+        vibes=vibes,
+        intensity=intensity,
+        energy=energy,
+        valence=valence,
+        tempo_range=tempo,
+    )
+
+
+# --- Public API ------------------------------------------------------------
+
+
+def analyze_prompt(prompt: str) -> Dict[str, object]:
+    """Parse user prompt into Spotify-like vibe phases.
+
+    Returns a dictionary with:
+    - phases: list of structured PhaseProfile dicts
+    - aggregated fields (artists, genres, moods, vibes, intensity, search_terms)
+    """
+
+    prompt = prompt.strip()
+    if not prompt:
+        return {
+            "phases": [],
+            "artists": [],
+            "genres": [],
+            "moods": [],
+            "vibes": [],
+            "intensity": 0.5,
+            "search_terms": [],
+        }
+
+    segments = _split_phases(prompt)
+    phases: List[PhaseProfile] = [_phase_from_text(role, text) for role, text in segments]
+
+    all_artists = list(dict.fromkeys([artist for phase in phases for artist in phase.artists]))
+    all_genres = list(dict.fromkeys([genre for phase in phases for genre in phase.genres]))
+    all_moods = list(dict.fromkeys([mood for phase in phases for mood in phase.moods]))
+    all_vibes = list(dict.fromkeys([vibe for phase in phases for vibe in phase.vibes]))
+    avg_intensity = sum(phase.intensity for phase in phases) / len(phases) if phases else 0.5
+    search_terms = list(dict.fromkeys(re.split(r"\s+", prompt.lower())))
 
     analysis = {
-        "artists": list(dict.fromkeys(artists)),
-        "genres": list(dict.fromkeys(genres)),
-        "moods": list(dict.fromkeys(moods)),
-        "vibes": list(dict.fromkeys(vibes)),
-        "intensity": intensity,
+        "phases": [phase.to_dict() for phase in phases],
+        "artists": all_artists,
+        "genres": all_genres,
+        "moods": all_moods,
+        "vibes": all_vibes,
+        "intensity": avg_intensity,
         "search_terms": search_terms,
     }
-    logger.info("Prompt analysis: %s", analysis)
+    logger.info("Prompt analysis complete: %s", analysis)
     return analysis
+

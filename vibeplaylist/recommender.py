@@ -18,6 +18,7 @@ from .yandex_client import (
     fetch_artist_and_similars,
     fetch_mood_station_tracks,
     fetch_similar_tracks_for_seed,
+    search_tracks_by_terms,
     search_artist,
     track_to_dict,
 )
@@ -117,6 +118,17 @@ def _collect_phase_candidates(phase: Dict[str, object], limit: int) -> List[Scor
     for track in station_tracks:
         scored.append(ScoredTrack(track, score_track_for_phase(track, phase) + 0.05, "mood_station"))
 
+    # If no seeds were found, try free-form search by the raw phase text or moods
+    if not scored:
+        raw_text = phase.get("raw_text", "")
+        search_terms = []
+        if raw_text:
+            search_terms.append(str(raw_text))
+        search_terms.extend(phase.get("moods", []))
+        search_terms.extend(phase.get("genres", []))
+        for track in search_tracks_by_terms(search_terms, limit=max(8, limit // 2)):
+            scored.append(ScoredTrack(track, score_track_for_phase(track, phase) + 0.05, "fallback_search"))
+
     # Deduplicate and sort by score
     deduped: List[ScoredTrack] = []
     seen_ids = set()
@@ -171,8 +183,19 @@ def generate_playlist_for_analysis(analysis: Dict[str, object], limit: int = 35)
 
     phases: List[Dict[str, object]] = analysis.get("phases", [])  # type: ignore[assignment]
     if not phases:
-        logger.warning("No phases detected; returning empty candidate list")
-        return []
+        logger.warning("No phases detected; falling back to a single generic phase")
+        fallback_phase = {
+            "role": "single",
+            "raw_text": analysis.get("prompt", ""),
+            "artists": analysis.get("artists", []),
+            "genres": analysis.get("genres", []),
+            "moods": analysis.get("moods", []),
+            "vibes": analysis.get("vibes", []),
+            "tempo_range": (80, 140),
+            "energy": analysis.get("intensity", 0.5),
+            "valence": 0.5,
+        }
+        phases = [fallback_phase]
 
     slice_sizes = _phase_slice_sizes(len(phases), limit)
     per_phase_tracks: List[List[ScoredTrack]] = []
@@ -197,6 +220,17 @@ def generate_playlist_for_analysis(analysis: Dict[str, object], limit: int = 35)
         final_tracks.append(info)
         if len(final_tracks) >= limit:
             break
+
+    # If still empty, try a broad rotor/mood search as a last resort
+    if not final_tracks:
+        logger.warning("Primary generation empty; using mood station fallback")
+        fallback_tracks = fetch_mood_station_tracks(analysis.get("moods", []), analysis.get("vibes", []), limit=limit)
+        for track in fallback_tracks:
+            info = track_to_dict(track)
+            if info and info["track_id"] not in seen:
+                final_tracks.append(info)
+                if len(final_tracks) >= limit:
+                    break
 
     logger.info("Generated %d final playlist tracks", len(final_tracks))
     return final_tracks

@@ -143,35 +143,56 @@ TRANSITION_MARKERS = [
     r"переход",
 ]
 
+# Triggers that suggest “artist-like” fragments. We bias toward these instead of
+# dropping the whole fragment when it also contains mood words (e.g. “агрессивное
+# типо ken carson”).
+ARTIST_HINT_WORDS = [
+    "типо",
+    "как",
+    "в стиле",
+    "стиле",
+    "по типу",
+    "style",
+    "like",
+    "similar",
+]
+
 
 # --- Helper utilities ------------------------------------------------------
 
 
 def _split_phases(prompt: str) -> List[Tuple[str, str]]:
-    """Heuristically split prompt into phases based on transition markers."""
+    """Heuristically split prompt into phases based on transition markers.
+
+    Handles Russian constructs like "с плавным переходом в" and "потом" to produce
+    start/end vibe phases for smoother playlists.
+    """
 
     lowered = prompt.lower()
     if not any(marker in lowered for marker in TRANSITION_MARKERS):
         return [("single", prompt)]
 
-    # Split by common transition words while keeping order
-    parts = re.split(r"(в начале|сначала|потом|затем|далее|в конце)", prompt, flags=re.IGNORECASE)
+    # Normalize frequent connective phrases to a unified splitter token
+    normalized = re.sub(r"с\s+плавн[\w\s]*переход[\w\s]*в", "|transition|", prompt, flags=re.IGNORECASE)
+    normalized = re.sub(r"плавн[\w\s]*переход", "|transition|", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b(потом|затем|далее)\b", "|then|", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bв конце\b", "|end|", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bсначала\b", "|start|", normalized, flags=re.IGNORECASE)
+
+    chunks = [c.strip() for c in normalized.split("|") if c.strip()]
     phases: List[Tuple[str, str]] = []
     role_order = ["start", "middle", "end"]
     role_idx = 0
-    buffer = ""
-    for part in parts:
-        if not part:
+    for chunk in chunks:
+        token = chunk.lower()
+        if token in {"transition", "then", "start"}:
+            role_idx = min(role_idx + 1, len(role_order) - 1)
             continue
-        if re.fullmatch(r"(в начале|сначала|потом|затем|далее|в конце)", part, flags=re.IGNORECASE):
-            if buffer.strip():
-                phases.append((role_order[min(role_idx, len(role_order) - 1)], buffer.strip()))
-                buffer = ""
-                role_idx = min(role_idx + 1, len(role_order) - 1)
-        else:
-            buffer += " " + part
-    if buffer.strip():
-        phases.append((role_order[min(role_idx, len(role_order) - 1)], buffer.strip()))
+        if token == "end":
+            role_idx = len(role_order) - 1
+            continue
+        phases.append((role_order[min(role_idx, len(role_order) - 1)], chunk))
+        role_idx = min(role_idx + 1, len(role_order) - 1)
 
     return phases or [("single", prompt)]
 
@@ -198,18 +219,41 @@ def _validate_artists(candidates: List[str]) -> List[str]:
 
 
 def _extract_artists(text: str) -> List[str]:
-    """Extract artist-like fragments split by commas, ampersands, and 'и'."""
+    """Extract artist-like fragments with bias toward connective phrases.
 
-    fragments = re.split(r",|&|\bи\b", text, flags=re.IGNORECASE)
+    This routine intentionally keeps fragments that mix vibe words with an artist
+    name (e.g. "агрессивное типо ken carson") by searching for tokens following
+    hint words. It falls back to comma/"и" splitting for simple lists.
+    """
+
+    lowered = text.lower()
     candidates: List[str] = []
+
+    # Pull names after hint words such as "типо", "как", "в стиле".
+    for hint in ARTIST_HINT_WORDS:
+        pattern = rf"{hint}\s+([\w\s'.,-]{2,40})"
+        for match in re.findall(pattern, lowered, flags=re.IGNORECASE):
+            cleaned = match.replace(" ,", ",").strip().strip(",.")
+            if cleaned:
+                candidates.append(cleaned)
+
+    # Also split by common delimiters to capture "nettspend, playboi carti" style.
+    fragments = re.split(r",|&|\bи\b", text, flags=re.IGNORECASE)
     for frag in fragments:
         candidate = frag.strip()
         if not candidate:
             continue
-        if any(keyword in candidate.lower() for values in MOOD_KEYWORDS.values() for keyword in values):
-            continue
-        candidates.append(candidate)
-    return _validate_artists(candidates)
+        # Remove leading vibe adjectives but keep trailing names
+        candidate = re.sub(r"^(агрессивн[\w\s]*|грустн[\w\s]*|тёмн[\w\s]*|мрачн[\w\s]*|холодн[\w\s]*|светл[\w\s]*|неоновый|неоновая)\s+",
+                           "",
+                           candidate,
+                           flags=re.IGNORECASE)
+        if candidate:
+            candidates.append(candidate)
+
+    # Validate against Yandex Music search to keep only real artists
+    validated = _validate_artists([c for c in candidates if len(c.split()) <= 5])
+    return validated
 
 
 def _collect_moods_and_genres(text: str) -> Tuple[List[str], List[str], List[str]]:
@@ -307,6 +351,7 @@ def analyze_prompt(prompt: str) -> Dict[str, object]:
     search_terms = list(dict.fromkeys(re.split(r"\s+", prompt.lower())))
 
     analysis = {
+        "prompt": prompt,
         "phases": [phase.to_dict() for phase in phases],
         "artists": all_artists,
         "genres": all_genres,

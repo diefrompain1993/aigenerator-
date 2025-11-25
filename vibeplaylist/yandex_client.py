@@ -57,6 +57,24 @@ def track_to_dict(track: Track) -> Optional[Dict[str, str | int]]:
     }
 
 
+def search_tracks_by_terms(terms: List[str], limit: int = 15) -> List[Track]:
+    """Fallback search that queries free-form terms and returns tracks."""
+
+    client = get_client()
+    collected: List[Track] = []
+    for term in terms:
+        try:
+            result = client.search(term, type_="track")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Track search failed for term '%s': %s", term, exc)
+            continue
+        if result and result.tracks and result.tracks.results:
+            collected.extend(result.tracks.results[: max(3, limit // 4)])
+        if len(collected) >= limit:
+            break
+    return _dedupe_tracks(collected, limit)
+
+
 def _dedupe_tracks(tracks: Iterable[Track], limit: int) -> List[Track]:
     seen: set[int] = set()
     unique: List[Track] = []
